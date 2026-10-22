@@ -1,0 +1,5 @@
+# Local keys and deployment word lists: never commit these.
+.forbidden-words
+.env*
+*.key
+*-header

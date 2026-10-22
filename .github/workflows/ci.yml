@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        php: [ '8.2', '8.3', '8.4', '8.5' ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup PHP ${{ matrix.php }}
+        # Third-party action, pinned to a commit: tag 2.40.0 (= v2 on 2026-10-17).
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl
+          coverage: none
+          ini-values: error_reporting=-1, display_errors=On
+
+      - name: PHP syntax lint
+        run: |
+          find . -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+          php -l bin/pm-check > /dev/null
+
+      - name: Test suite
+        env:
+          # Deployment-specific words refused in the tree (kept out of the repository). Required on pushes and
+          # same-repository pull requests; a pull request from a fork gets no secrets and runs the other checks.
+          KOKKO_FORBIDDEN_WORDS: ${{ secrets.KOKKO_FORBIDDEN_WORDS }}
+          KOKKO_REQUIRE_FORBIDDEN_WORDS: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '1' || '0' }}
+        run: php tests/run.php

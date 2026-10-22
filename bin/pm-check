@@ -1,0 +1,113 @@
+#!/usr/bin/env php
+<?php
+// pm-check: one check for an OpenClaw command job, so a scheduled warning costs no AI credits.
+//
+//   php bin/pm-check credits --below <credits> [--key-file <path>] [--days <1..400>]
+//
+// Prints NO_REPLY (OpenClaw posts nothing) only after a successful read shows a balance at or
+// above the threshold; prints a short warning when it is below; exits non-zero on every failure
+// so OpenClaw records the run as an error and its failure alert can fire.
+
+declare(strict_types=1);
+
+const PM_CHECK_DEFAULT_ENDPOINT = 'https://virsilipas.mcx.fi/v1';
+const PM_CHECK_EXIT_FAILED = 1;   // a request or a read failed
+const PM_CHECK_EXIT_USAGE = 2;    // bad arguments or an unsafe key file
+
+/** Parse "credits --below N [--key-file P] [--days D]" into options, or throw on anything else. */
+function pmCheckArgs(array $argv): array
+{
+    $args = array_slice($argv, 1);
+    if (($args[0] ?? '') !== 'credits') {
+        throw new InvalidArgumentException('usage: pm-check credits --below <credits> [--key-file <path>] [--days <1..400>]');
+    }
+    $opts = array('below' => null, 'keyFile' => (getenv('HOME') ?: '') . '/.virsilipasKey', 'days' => 7);
+    for ($i = 1; $i < count($args); $i++) {
+        $name = $args[$i];
+        $value = $args[++$i] ?? null;
+        if ($value === null) throw new InvalidArgumentException("missing value for $name");
+        if ($name === '--below' && ctype_digit($value)) $opts['below'] = (int) $value;
+        elseif ($name === '--key-file') $opts['keyFile'] = $value;
+        elseif ($name === '--days' && ctype_digit($value) && (int) $value >= 1 && (int) $value <= 400) $opts['days'] = (int) $value;
+        else throw new InvalidArgumentException("bad option $name");
+    }
+    if ($opts['below'] === null) throw new InvalidArgumentException('--below <credits> is required');
+    return $opts;
+}
+
+/** Read key= and endpoint= from the key file; refuse a file other accounts can read. */
+function pmCheckKeyFile(string $path): array
+{
+    clearstatcache();
+    $perms = @fileperms($path);
+    if ($perms === false || !is_file($path)) throw new InvalidArgumentException("key file not found: $path");
+    if (($perms & 0077) !== 0) throw new InvalidArgumentException("key file $path is readable by others; run: chmod 600 $path");
+    $key = null;
+    $endpoint = PM_CHECK_DEFAULT_ENDPOINT;
+    foreach (preg_split('/\R/', (string) file_get_contents($path)) as $line) {
+        if (strncmp($line, 'key=', 4) === 0) $key = trim(substr($line, 4));
+        if (strncmp($line, 'endpoint=', 9) === 0 && trim(substr($line, 9)) !== '') $endpoint = rtrim(trim(substr($line, 9)), '/');
+    }
+    if ($key === null || preg_match('/^vsk-[A-Za-z0-9_-]{16,128}$/D', $key) !== 1) throw new InvalidArgumentException("no valid key= line in $path");
+    // https only; plain http is allowed to this machine alone (the test suite's stand-in server).
+    if (preg_match('#^https://#', $endpoint) !== 1 && preg_match('#^http://127\.0\.0\.1(:\d+)?(/|$)#', $endpoint) !== 1) {
+        throw new InvalidArgumentException("endpoint must be https: $endpoint");
+    }
+    return array('key' => $key, 'endpoint' => $endpoint);
+}
+
+/** GET one route with the key in a header (never in the command line or the URL); decode JSON or throw. */
+function pmCheckGet(string $url, string $key): array
+{
+    $curl = curl_init($url);
+    curl_setopt_array($curl, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => array('Authorization: Bearer ' . $key, 'Accept: application/json'),
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_FOLLOWLOCATION => false,
+    ));
+    $body = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    $error = curl_error($curl);
+    if ($body === false) throw new RuntimeException("request failed: $error");
+    if ($status !== 200) throw new RuntimeException("HTTP $status from " . parse_url($url, PHP_URL_PATH));
+    $data = json_decode((string) $body, true);
+    if (!is_array($data)) throw new RuntimeException('answer was not JSON from ' . parse_url($url, PHP_URL_PATH));
+    return $data;
+}
+
+/** Build the one-line result: NO_REPLY when healthy, else a warning with the measured runway. */
+function pmCheckCreditsMessage(array $balance, array $usage, int $below, int $days): string
+{
+    if (!isset($balance['balance']) || !is_int($balance['balance'])) throw new RuntimeException('balance missing from the answer');
+    $left = $balance['balance'];
+    if ($left >= $below) return 'NO_REPLY';
+    $spent = 0;
+    foreach (($usage['daily'] ?? array()) as $day) $spent += is_int($day['credits'] ?? null) ? $day['credits'] : 0;
+    $perDay = $spent / $days;
+    $runway = $perDay > 0 ? sprintf('about %.1f days at the last %d days\' average of %d credits a day', max($left, 0) / $perDay, $days, (int) round($perDay)) : "no spending in the last $days days";
+    return sprintf('Pulsed Media AI credits are low: %d left (warning below %d), %s.', $left, $below, $runway);
+}
+
+function pmCheckMain(array $argv): int
+{
+    try {
+        $opts = pmCheckArgs($argv);
+        $file = pmCheckKeyFile($opts['keyFile']);
+    } catch (InvalidArgumentException $e) {
+        fwrite(STDERR, 'pm-check: ' . $e->getMessage() . "\n");
+        return PM_CHECK_EXIT_USAGE;
+    }
+    try {
+        $balance = pmCheckGet($file['endpoint'] . '/balance', $file['key']);
+        $usage = pmCheckGet($file['endpoint'] . '/usage?days=' . $opts['days'] . '&grants=1', $file['key']);
+        echo pmCheckCreditsMessage($balance, $usage, $opts['below'], $opts['days']), "\n";
+        return 0;
+    } catch (RuntimeException $e) {
+        fwrite(STDERR, 'pm-check: ' . $e->getMessage() . "\n");
+        return PM_CHECK_EXIT_FAILED;
+    }
+}
+
+if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === realpath(__FILE__)) exit(pmCheckMain($argv));
