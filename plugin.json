@@ -1,7 +1,7 @@
 {
     "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
     "name": "mcxkokko",
-    "version": "0.1.1",
-    "description": "Pulsed Media services for OpenClaw and other agents: AI credits, the customer API, support tickets and documentation",
+    "version": "0.2.0",
+    "description": "Pulsed Media services for OpenClaw and other agents: AI credits, the customer API, ordering, support tickets and documentation",
     "license": "Apache-2.0"
 }

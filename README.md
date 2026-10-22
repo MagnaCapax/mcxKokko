@@ -1,6 +1,6 @@
 # mcxKokko
 
-Pulsed Media services for [OpenClaw](https://github.com/openclaw/openclaw) and other AI agents that read AgentSkills folders. Your agent can check your AI credits, look up your Pulsed Media services, search Pulsed Media's documentation, and open a support ticket, all with your own keys.
+Pulsed Media services for [OpenClaw](https://github.com/openclaw/openclaw) and other AI agents that read AgentSkills folders. Your agent can check your AI credits, look up your Pulsed Media services, search Pulsed Media's documentation, open a support ticket, and order a new service after you approve it, all with your own keys.
 
 > *Kokko, the great eagle of the Kalevala, carries Väinämöinen out of the sea to wherever he needs to go.*
 
@@ -12,6 +12,7 @@ Pulsed Media services for [OpenClaw](https://github.com/openclaw/openclaw) and o
 | `pm-account` | List your Pulsed Media services, their status, next due date and price, and your seedbox disk use and traffic | customer API key | No |
 | `pm-docs` | Search the Pulsed Media knowledge base and wiki, and read the latest announcements, before answering | none | No |
 | `pm-ticket` | Open a support ticket after showing you exactly what it will send and getting your yes | AI key + your account email | No |
+| `pm-order` | Quote a new Pulsed Media service and order it at that price once you approve the command on OpenClaw's approval card | order key | No; the order is paid like any other order |
 
 Only the agent's own chat turns use AI credits, the same as without these skills.
 
@@ -24,11 +25,11 @@ On a Pulsed Media seedbox with Pikkumies installed, Pikkumies already gives Open
 Tested with OpenClaw 2026.10.5. You need `git` and `curl`; the scheduled check also needs PHP 8.2 or newer with curl.
 
 ```sh
-git clone --branch v0.1.1 https://github.com/MagnaCapax/mcxKokko ~/src/mcxKokko
+git clone --branch v0.2.0 https://github.com/MagnaCapax/mcxKokko ~/src/mcxKokko
 openclaw plugins install -l ~/src/mcxKokko
 ```
 
-OpenClaw shows what the bundle adds (four skills) and asks before enabling it; in a script without a terminal, add `--force` after you have reviewed it. Update later with `git -C ~/src/mcxKokko pull` (or check out a newer tag).
+OpenClaw shows what the bundle adds (five skills) and asks before enabling it; in a script without a terminal, add `--force` after you have reviewed it. Update later with `git -C ~/src/mcxKokko pull` (or check out a newer tag).
 
 Without the plugin step, point OpenClaw at the skills folder instead, in `~/.openclaw/openclaw.json`:
 
@@ -48,11 +49,28 @@ Save keys from a terminal, never by pasting them into the chat (the chat is stor
   umask 077; read -rs -p 'AI key: ' K; printf 'endpoint=https://virsilipas.mcx.fi/v1\nkey=%s\n' "$K" > ~/.virsilipasKey; unset K
   ```
 
-- **Customer API key** (for `pm-account`). Create it in the client area under Services, "API access", and leave ordering off:
+- **Customer API key** (for `pm-account`). Create it in the client area under Services, "API access", "Create an API key". It reads only:
 
   ```sh
   umask 077; mkdir -p ~/.config/pulsedmedia; read -rs -p 'API key: ' K; printf 'X-API-Key: %s\n' "$K" > ~/.config/pulsedmedia/pmapi-header; unset K
   ```
+
+- **Order key** (for `pm-order` only). Create it on the same page with "Create an order key" (shown while ordering through the API is on). It can place orders and cannot read services; keep it in its own file:
+
+  ```sh
+  umask 077; mkdir -p ~/.config/pulsedmedia; read -rs -p 'Order key: ' K; printf 'X-API-Key: %s\n' "$K" > ~/.config/pulsedmedia/pmapi-order-header; unset K
+  ```
+
+## Ordering needs your approval each time
+
+`pm-order` spends money: account credit is used at once, the rest is invoiced. Its confirm step runs only where OpenClaw asks you before each command:
+
+1. `openclaw exec-policy show --agent main` must show mode `ask` (or ask `always`). OpenClaw's default mode `full` asks nothing, and `auto` lets a model reviewer approve; in both, `pm-order confirm` refuses and orders nothing.
+2. Do not add `pm-order` to the allowlist, and keep "Auto-allow skill CLIs" off.
+3. On the card, read the product, the first payment and currency, and `--accept-terms` (you accept the terms at the link in the quote). Approve with "Allow once".
+4. The server refuses the order (HTTP 409, nothing ordered) if the price is not the one on the card.
+
+Approval cards cut accidental and injected orders, but they are not a wall between users: an agent running as you can read files you can read. Where your agent reads untrusted content (mail, web pages, shared chats), give the order key file and the helper to a separate system user and let the agent run only `sudo -u <that user> <path>/pm-order ...`.
 
 ## Low-balance warning (no AI credits used)
 

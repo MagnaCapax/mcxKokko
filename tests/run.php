@@ -33,7 +33,7 @@ function urlsIn(string $text): array
 }
 
 // --- Repository layout and the Agent Plugins manifest -------------------------------------------
-foreach (array('LICENSE', 'NOTICE', 'README.md', 'AGENTS.md', 'SECURITY.md', 'CHANGELOG.md', 'plugin.json', 'bin/pm-check', 'docs/adr/0000-template.md', 'docs/adr/0001-layout-languages-and-install.md') as $file) {
+foreach (array('LICENSE', 'NOTICE', 'README.md', 'AGENTS.md', 'SECURITY.md', 'CHANGELOG.md', 'plugin.json', 'bin/pm-check', 'skills/pm-order/bin/pm-order', 'docs/adr/0000-template.md', 'docs/adr/0001-layout-languages-and-install.md') as $file) {
     check(is_file("$root/$file"), "file exists: $file");
 }
 $manifest = json_decode((string) @file_get_contents("$root/plugin.json"), true);
@@ -46,7 +46,7 @@ foreach (array('openclaw.plugin.json', 'package.json', 'index.js', 'index.ts', '
 
 // --- Skills -------------------------------------------------------------------------------------
 $skillDirs = glob("$root/skills/*", GLOB_ONLYDIR) ?: array();
-check(count($skillDirs) === 4, 'four skills');
+check(count($skillDirs) === 5, 'five skills');
 $skillUrls = array();
 $readme = (string) @file_get_contents("$root/README.md");
 foreach ($skillDirs as $dir) {
@@ -56,7 +56,12 @@ foreach ($skillDirs as $dir) {
     check(($keys['name'] ?? '') === $name, "$name: frontmatter name matches its folder");
     check(strlen($keys['description'] ?? '') >= 40, "$name: has a description");
     $meta = json_decode($keys['metadata'] ?? '', true);
-    check(is_array($meta['openclaw']['requires']['bins'] ?? null), "$name: metadata.openclaw.requires.bins is set");
+    if ($name === 'pm-order') {
+        // Declaring php there would put php on OpenClaw's skill-CLI auto-allowlist, so a confirm could run without a card.
+        check(is_array($meta['openclaw'] ?? null) && !isset($meta['openclaw']['requires']['bins']), "$name: declares no requires.bins");
+    } else {
+        check(is_array($meta['openclaw']['requires']['bins'] ?? null), "$name: metadata.openclaw.requires.bins is set");
+    }
     check(strpos($name, 'pm-') === 0, "$name: prefixed name (never shadows a user's or Pikkumies' own skill)");
     check(strpos($readme, "`$name`") !== false, "$name: listed in README");
     // A key never reaches a command line: no header built from a shell variable or a pasted key.
@@ -68,7 +73,7 @@ foreach ($skillDirs as $dir) {
 
 // --- Endpoints: every one a skill or the CLI uses is declared in SECURITY.md ---------------------
 $security = (string) @file_get_contents("$root/SECURITY.md");
-$cliText = (string) @file_get_contents("$root/bin/pm-check");
+$cliText = (string) @file_get_contents("$root/bin/pm-check") . (string) @file_get_contents("$root/skills/pm-order/bin/pm-order");
 foreach (urlsIn($cliText) as $url) $skillUrls[$url] = true;
 $declared = urlsIn($security);
 foreach (array_keys($skillUrls) as $url) {
@@ -140,6 +145,88 @@ stream_get_contents($p[2]);
 fclose($p[1]);
 fclose($p[2]);
 check(proc_close($proc) === 2, 'missing key file: exit 2');
+
+// --- skills/pm-order/bin/pm-order against the stand-in order endpoint ------------------------------
+$stubDir = "$work/stub-bin";
+mkdir($stubDir, 0700);
+// A stand-in for `openclaw exec-policy show --json`: the mode and ask come from the environment; "fail" exits 1.
+file_put_contents("$stubDir/openclaw", "#!" . PHP_BINARY . "\n<?php\nif (getenv('STUB_MODE') === 'fail') exit(1);\n"
+    . "echo json_encode(array('effectivePolicy' => array('scopes' => array(array('mode' => array('effective' => getenv('STUB_MODE')), 'ask' => array('effective' => getenv('STUB_ASK') ?: 'on-miss'))))));\n");
+chmod("$stubDir/openclaw", 0700);
+
+/** Run pm-order for one scenario; $stub null = no openclaw on PATH. Returns [exit code, stdout, stderr]. */
+function runOrder(string $root, string $work, int $port, string $scenario, array $args, ?string $stubMode, int $mode = 0600, ?string $endpoint = null, ?string $stubAsk = null): array
+{
+    $file = "$work/$scenario.order";
+    file_put_contents($file, 'X-API-Key: pm_' . str_pad("test-$scenario-", 43, 'x') . "\n");
+    chmod($file, $mode);
+    $env = getenv();
+    $env['PATH'] = ($stubMode !== null ? "$work/stub-bin" . PATH_SEPARATOR : '') . '/usr/bin' . PATH_SEPARATOR . '/bin';
+    $env['STUB_MODE'] = (string) $stubMode;
+    $env['STUB_ASK'] = (string) $stubAsk;
+    $cmd = array_merge(array(PHP_BINARY, "$root/skills/pm-order/bin/pm-order"), $args,
+        array('--header-file', $file, '--endpoint', $endpoint ?? "http://127.0.0.1:$port/remote/pmapi-order.php"));
+    $proc = proc_open($cmd, array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $p, null, $env);
+    $out = stream_get_contents($p[1]);
+    $err = stream_get_contents($p[2]);
+    fclose($p[1]);
+    fclose($p[2]);
+    return array(proc_close($proc), trim($out), trim($err));
+}
+
+/** How many order requests the stand-in has received so far. */
+function orderRequests(int $port): int
+{
+    $log = sys_get_temp_dir() . "/kokko-stand-in-orders-$port.log";
+    return is_file($log) ? count(file($log)) : 0;
+}
+
+$quoteArgs = array('quote', '--pid', '197', '--cycle', 'monthly', '--field', 'Username=myname');
+$confirmArgs = array('confirm', '--pid', '197', '--cycle', 'monthly', '--field', 'Username=myname', '--expect-payment', '12.50', '--expect-currency', 'EUR', '--accept-terms');
+list($rc, $out, $err) = runOrder($root, $work, $port, 'shop', $quoteArgs, null);
+check($rc === 0 && strpos($out, 'First payment: 12.50 EUR') !== false && strpos($out, 'nothing ordered yet') !== false, 'quote: price shown, nothing ordered, no OpenClaw needed');
+check(preg_match('#pm-order confirm --pid 197 --cycle monthly --field Username=myname --expect-payment 12\.50 --expect-currency EUR --accept-terms$#m', $out) === 1, 'quote: prints the exact confirm line with the quoted price');
+list($rc, $out, $err) = runOrder($root, $work, $port, 'shop', $confirmArgs, 'ask');
+check($rc === 0 && strpos($out, 'Ordered: order 4242, invoice 777') !== false, 'confirm where a person is asked: ordered at the quoted price');
+$before = orderRequests($port);
+list($rc, $out, $err) = runOrder($root, $work, $port, 'shop', $confirmArgs, 'full');
+check($rc === 1 && $out === '' && strpos($err, 'nothing was ordered') !== false && orderRequests($port) === $before, 'confirm with mode full: refused before any request');
+list($rc, , $err) = runOrder($root, $work, $port, 'shop', $confirmArgs, 'auto');
+check($rc === 1 && strpos($err, 'mode auto') !== false && orderRequests($port) === $before, 'confirm with mode auto (a model may approve): refused');
+list($rc, , $err) = runOrder($root, $work, $port, 'shop', $confirmArgs, null);
+check($rc === 1 && strpos($err, 'not on PATH') !== false && orderRequests($port) === $before, 'confirm without OpenClaw: refused');
+list($rc) = runOrder($root, $work, $port, 'shop', $confirmArgs, 'fail');
+check($rc === 1 && orderRequests($port) === $before, 'confirm when the policy report fails: refused');
+list($rc, $out) = runOrder($root, $work, $port, 'shop', $confirmArgs, 'allowlist', 0600, null, 'always');
+check($rc === 0 && strpos($out, 'Ordered:') !== false, 'confirm with ask always: allowed');
+list($rc, , $err) = runOrder($root, $work, $port, 'changed', $confirmArgs, 'ask');
+check($rc === 1 && strpos($err, 'HTTP 409') !== false && strpos($err, 'Ask for a new quote') !== false, 'price changed: 409 passed on, nothing ordered');
+list($rc, , $err) = runOrder($root, $work, $port, 'broken', $confirmArgs, 'ask');
+check($rc === 1 && strpos($err, 'Check Invoices in the client area before trying again') !== false, 'server error: tells the owner to check invoices, no retry');
+$before = orderRequests($port);
+runOrder($root, $work, $port, 'broken', $confirmArgs, 'ask');
+check(orderRequests($port) === $before + 1, 'a failed confirm sends exactly one request (never retries)');
+list($rc, , $err) = runOrder($root, $work, $port, 'unauthorized', $quoteArgs, null);
+check($rc === 1 && strpos($err, 'HTTP 401') !== false, 'refused key: exit 1');
+list($rc) = runOrder($root, $work, $port, 'shop', array_slice($confirmArgs, 0, -1), 'ask');
+check($rc === 2, 'confirm without --accept-terms: exit 2');
+list($rc) = runOrder($root, $work, $port, 'shop', array('confirm', '--pid', '197', '--cycle', 'monthly', '--accept-terms'), 'ask');
+check($rc === 2, 'confirm without the quoted price: exit 2');
+list($rc) = runOrder($root, $work, $port, 'shop', $quoteArgs, null, 0644);
+check($rc === 2, 'order key file readable by others: refused, exit 2');
+list($rc) = runOrder($root, $work, $port, 'shop', $quoteArgs, null, 0600, 'http://example.invalid/remote/pmapi-order.php');
+check($rc === 2, 'plain-http order endpoint off this machine: refused, exit 2');
+file_put_contents("$work/bad.order", "Authorization: Bearer nonsense\n");
+chmod("$work/bad.order", 0600);
+$proc = proc_open(array(PHP_BINARY, "$root/skills/pm-order/bin/pm-order", 'quote', '--pid', '1', '--cycle', 'monthly', '--header-file', "$work/bad.order"), array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $p);
+stream_get_contents($p[1]);
+stream_get_contents($p[2]);
+fclose($p[1]);
+fclose($p[2]);
+check(proc_close($proc) === 2, 'header file without an X-API-Key line: exit 2');
+@unlink(sys_get_temp_dir() . "/kokko-stand-in-orders-$port.log");
+array_map('unlink', glob("$stubDir/*") ?: array());
+rmdir($stubDir);
 
 proc_terminate($server);
 proc_close($server);

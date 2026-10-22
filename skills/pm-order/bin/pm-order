@@ -1,0 +1,184 @@
+#!/usr/bin/env php
+<?php
+// pm-order: order a NEW Pulsed Media service with the account's ORDER key, in two steps.
+//
+//   pm-order quote   --pid <id> --cycle <cycle> [--field Name=value]... [--option Name=value]...
+//   pm-order confirm --pid <id> --cycle <cycle> [--field ...]... [--option ...]...
+//                    --expect-payment <amount> --expect-currency <code> --accept-terms
+//
+// quote places nothing and prints the price and the exact confirm command. confirm places the order
+// only at that price (the server refuses with 409 when the price is not that now), and only on a
+// host where OpenClaw asks a person before each command runs. Never retries.
+// Options for both: --header-file <path> (default ~/.config/pulsedmedia/pmapi-order-header),
+// --agent <id> (default main), --endpoint <url> (tests only).
+
+declare(strict_types=1);
+
+const PM_ORDER_DEFAULT_ENDPOINT = 'https://pulsedmedia.com/remote/pmapi-order.php';
+const PM_ORDER_EXIT_FAILED = 1;   // the server refused, the request failed, or approvals are not set up
+const PM_ORDER_EXIT_USAGE = 2;    // bad arguments or an unsafe key file
+
+/** Parse the command line into options, or throw on anything else. */
+function pmOrderArgs(array $argv): array
+{
+    $args = array_slice($argv, 1);
+    $mode = array_shift($args);
+    if ($mode !== 'quote' && $mode !== 'confirm') {
+        throw new InvalidArgumentException('usage: pm-order quote|confirm --pid <id> --cycle <cycle> [--field Name=value] [--option Name=value] ...');
+    }
+    $o = array('mode' => $mode, 'pid' => null, 'cycle' => null, 'fields' => array(), 'options' => array(), 'payment' => null,
+        'currency' => null, 'terms' => false, 'agent' => 'main', 'endpoint' => PM_ORDER_DEFAULT_ENDPOINT,
+        'headerFile' => (getenv('HOME') ?: '') . '/.config/pulsedmedia/pmapi-order-header');
+    for ($i = 0; $i < count($args); $i++) {
+        $name = $args[$i];
+        if ($name === '--accept-terms') { $o['terms'] = true; continue; }
+        $value = $args[++$i] ?? null;
+        if ($value === null) throw new InvalidArgumentException("missing value for $name");
+        if ($name === '--pid' && ctype_digit($value) && (int) $value > 0) $o['pid'] = (int) $value;
+        elseif ($name === '--cycle' && preg_match('/^[a-z]{4,13}$/D', $value) === 1) $o['cycle'] = $value;
+        elseif (($name === '--field' || $name === '--option') && preg_match('/^([^=]{1,100})=(.{0,500})$/sD', $value, $m) === 1) {
+            $o[$name === '--field' ? 'fields' : 'options'][$m[1]] = $m[2];
+        } elseif ($name === '--expect-payment' && preg_match('/^\d{1,9}\.\d{2}$/D', $value) === 1) $o['payment'] = $value;
+        elseif ($name === '--expect-currency' && preg_match('/^[A-Z]{3}$/D', $value) === 1) $o['currency'] = $value;
+        elseif ($name === '--agent' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $value) === 1) $o['agent'] = $value;
+        elseif ($name === '--header-file') $o['headerFile'] = $value;
+        elseif ($name === '--endpoint') $o['endpoint'] = $value;
+        else throw new InvalidArgumentException("bad option $name");
+    }
+    if ($o['pid'] === null || $o['cycle'] === null) throw new InvalidArgumentException('--pid and --cycle are required');
+    if ($mode === 'confirm' && ($o['payment'] === null || $o['currency'] === null || !$o['terms'])) {
+        throw new InvalidArgumentException('confirm needs --expect-payment, --expect-currency and --accept-terms, exactly as the quote printed them');
+    }
+    // https only; plain http is allowed to this machine alone (the test suite's stand-in server).
+    if (preg_match('#^https://#', $o['endpoint']) !== 1 && preg_match('#^http://127\.0\.0\.1(:\d+)?/#', $o['endpoint']) !== 1) {
+        throw new InvalidArgumentException('endpoint must be https: ' . $o['endpoint']);
+    }
+    return $o;
+}
+
+/** The "X-API-Key: pm_..." line from the header file; refuse a file other accounts can read. */
+function pmOrderHeader(string $path): string
+{
+    clearstatcache();
+    $perms = @fileperms($path);
+    if ($perms === false || !is_file($path)) throw new InvalidArgumentException("order key file not found: $path");
+    if (($perms & 0077) !== 0) throw new InvalidArgumentException("order key file $path is readable by others; run: chmod 600 $path");
+    $line = trim((string) file_get_contents($path));
+    if (preg_match('/^X-API-Key: pm_[A-Za-z0-9_-]{43}$/D', $line) !== 1) throw new InvalidArgumentException("no valid X-API-Key line in $path");
+    return $line;
+}
+
+/**
+ * Why this host would run a confirm without asking a person, or null when it asks. Reads OpenClaw's own
+ * offline policy report: only mode "ask" (allowlist + ask on miss) or an "always" ask puts a person
+ * in front of each command; "full" asks nothing and "auto" lets a model reviewer approve.
+ */
+function pmOrderApprovalProblem(string $agent): ?string
+{
+    $bin = null;
+    foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $dir) {
+        if ($dir !== '' && is_file("$dir/openclaw") && is_executable("$dir/openclaw")) { $bin = "$dir/openclaw"; break; }
+    }
+    if ($bin === null) return 'OpenClaw is not on PATH, so it cannot be checked that a person approves each order';
+    $proc = proc_open(array($bin, 'exec-policy', 'show', '--agent', $agent, '--json'), array(1 => array('pipe', 'w'), 2 => array('file', '/dev/null', 'w')), $p);
+    if (!is_resource($proc)) return 'could not run openclaw exec-policy show';
+    $out = stream_get_contents($p[1]);
+    fclose($p[1]);
+    if (proc_close($proc) !== 0) return 'openclaw exec-policy show failed';
+    $scopes = json_decode((string) $out, true)['effectivePolicy']['scopes'] ?? null;
+    if (!is_array($scopes) || $scopes === array()) return 'openclaw exec-policy show gave no policy';
+    foreach ($scopes as $s) {
+        $mode = $s['mode']['effective'] ?? '';
+        $ask = $s['ask']['effective'] ?? '';
+        if ($ask !== 'always' && $mode !== 'ask') {
+            return "OpenClaw runs commands for agent $agent without asking a person (mode $mode, ask $ask)";
+        }
+    }
+    return null;
+}
+
+/** POST the order request; return [HTTP status, decoded body]. */
+function pmOrderPost(string $endpoint, string $header, array $body): array
+{
+    $curl = curl_init($endpoint);
+    curl_setopt_array($curl, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_SLASHES),
+        CURLOPT_HTTPHEADER => array($header, 'Content-Type: application/json', 'Accept: application/json'),
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 90,
+        CURLOPT_FOLLOWLOCATION => false,
+    ));
+    $raw = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    if ($raw === false) throw new RuntimeException('no answer from the order address (' . curl_error($curl) . '). Check Invoices in the client area before trying again.');
+    $data = json_decode((string) $raw, true);
+    if (!is_array($data)) throw new RuntimeException("HTTP $status with an answer that is not JSON. Check Invoices in the client area before trying again.");
+    return array($status, $data);
+}
+
+/** The request body both modes send; confirm adds the terms and the price pin. */
+function pmOrderBody(array $o): array
+{
+    $body = array('pid' => $o['pid'], 'billingcycle' => $o['cycle']);
+    if ($o['fields']) $body['customfields'] = $o['fields'];
+    if ($o['options']) $body['configoptions'] = $o['options'];
+    if ($o['mode'] === 'confirm') {
+        $body += array('confirm' => true, 'accept_tos' => true, 'expect_first_payment' => $o['payment'], 'expect_currency' => $o['currency']);
+    }
+    return $body;
+}
+
+/** The exact confirm command for this quote, one argument per shell word. */
+function pmOrderConfirmLine(array $o, array $quote): string
+{
+    $words = array((string) (realpath(__FILE__) ?: 'pm-order'), 'confirm', '--pid', (string) $o['pid'], '--cycle', $o['cycle']);
+    foreach ($o['fields'] as $k => $v) array_push($words, '--field', "$k=$v");
+    foreach ($o['options'] as $k => $v) array_push($words, '--option', "$k=$v");
+    array_push($words, '--expect-payment', (string) $quote['first_payment'], '--expect-currency', (string) $quote['currency'], '--accept-terms');
+    return implode(' ', array_map(fn ($w) => preg_match('/^[A-Za-z0-9_.:=\/-]+$/D', $w) === 1 ? $w : escapeshellarg($w), $words));
+}
+
+function pmOrderMain(array $argv): int
+{
+    try {
+        $o = pmOrderArgs($argv);
+        $header = pmOrderHeader($o['headerFile']);
+    } catch (InvalidArgumentException $e) {
+        fwrite(STDERR, 'pm-order: ' . $e->getMessage() . "\n");
+        return PM_ORDER_EXIT_USAGE;
+    }
+    if ($o['mode'] === 'confirm') {
+        $problem = pmOrderApprovalProblem($o['agent']);
+        if ($problem !== null) {
+            fwrite(STDERR, "pm-order: nothing was ordered: $problem. Set OpenClaw to ask before each command (see the pm-order skill setup), or order in the client area.\n");
+            return PM_ORDER_EXIT_FAILED;
+        }
+    }
+    try {
+        list($status, $data) = pmOrderPost($o['endpoint'], $header, pmOrderBody($o));
+    } catch (RuntimeException $e) {
+        fwrite(STDERR, 'pm-order: ' . $e->getMessage() . "\n");
+        return PM_ORDER_EXIT_FAILED;
+    }
+    $quote = is_array($data['quote'] ?? null) ? $data['quote'] : null;
+    if ($o['mode'] === 'quote' && $status === 200 && $quote !== null && is_string($quote['first_payment'] ?? null)) {
+        printf("Quote (nothing ordered yet): %s (product %d), %s\nFirst payment: %s %s. Any account credit is used first and at once; the rest is invoiced.\nTerms: %s\n",
+            (string) ($quote['product'] ?? ''), $o['pid'], $o['cycle'], $quote['first_payment'], (string) ($quote['currency'] ?? ''), (string) ($quote['terms'] ?? ''));
+        echo "To order at this price, after the account owner accepts the terms above, run:\n  " . pmOrderConfirmLine($o, $quote) . "\n";
+        return 0;
+    }
+    if ($o['mode'] === 'confirm' && $status === 201) {
+        printf("Ordered: order %s, invoice %s.\nPay or check it here: %s\nAny account credit was used first. This helper cannot undo or cancel an order; questions about an order go to the client area or a support ticket.\n",
+            (string) ($data['order_id'] ?? '?'), (string) ($data['invoice_id'] ?? '-'), (string) ($data['pay_url'] ?? 'the client area, Invoices'));
+        return 0;
+    }
+    $error = rtrim(is_string($data['error'] ?? null) ? $data['error'] : "HTTP $status", '.');
+    $problems = is_array($data['problems'] ?? null) ? ' (' . implode('; ', array_map('strval', $data['problems'])) . ')' : '';
+    $tail = $status === 409 && $quote !== null ? ' Ask for a new quote.' : ($status >= 500 ? ' Check Invoices in the client area before trying again.' : '');
+    fwrite(STDERR, "pm-order: HTTP $status: $error$problems.$tail\n");
+    return PM_ORDER_EXIT_FAILED;
+}
+
+if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === realpath(__FILE__)) exit(pmOrderMain($argv));

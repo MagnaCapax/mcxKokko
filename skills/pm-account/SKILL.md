@@ -9,7 +9,7 @@ metadata: { "openclaw": { "emoji": "🧾", "requires": { "bins": ["curl"] } } }
 
 ## The key
 
-The account owner creates the key in the client area, under Services, "API access". Leave "Allow this key to place orders" unticked: this skill only reads. The key is shown once. The user saves it in a header file, mode 0600, from a terminal:
+The account owner creates the key in the client area, under Services, "API access", "Create an API key". This skill only reads: never use an order key here (an order key cannot read services and gets HTTP 403). An older key created with "Allow this key to place orders" also works, but a key that can order should stay with the ordering tool only. The key is shown once. The user saves it in a header file, mode 0600, from a terminal:
 
 ```sh
 umask 077; mkdir -p ~/.config/pulsedmedia; read -rs -p 'API key: ' K; printf 'X-API-Key: %s\n' "$K" > ~/.config/pulsedmedia/pmapi-header; unset K

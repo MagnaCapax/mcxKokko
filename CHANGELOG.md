@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 (2026-10-22)
+
+- New skill `pm-order` with its helper `skills/pm-order/bin/pm-order`: quote a new service, then order it at that price with the account's ORDER key. The confirm step refuses unless OpenClaw asks a person before each command, sends the quoted price so the server refuses a changed price, and never retries.
+- `pm-account` and the README describe the read key and the separate order key.
+
 ## 0.1.1 (2026-10-22)
 
 - Tests: read and close a child process's pipes before waiting for it, so the missing-key-file check passes on CI.
