@@ -24,7 +24,7 @@ On a Pulsed Media seedbox with Pikkumies installed, Pikkumies already gives Open
 Tested with OpenClaw 2026.10.5. You need `git` and `curl`; the scheduled check also needs PHP 8.2 or newer with curl.
 
 ```sh
-git clone --branch v0.1.0 https://github.com/MagnaCapax/mcxKokko ~/src/mcxKokko
+git clone --branch v0.1.1 https://github.com/MagnaCapax/mcxKokko ~/src/mcxKokko
 openclaw plugins install -l ~/src/mcxKokko
 ```
 

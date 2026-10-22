@@ -108,6 +108,8 @@ function runCheck(string $root, string $work, int $port, string $scenario, array
     $proc = proc_open($cmd, array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $p);
     $out = stream_get_contents($p[1]);
     $err = stream_get_contents($p[2]);
+    fclose($p[1]);
+    fclose($p[2]);
     return array(proc_close($proc), trim($out), trim($err));
 }
 
@@ -133,6 +135,10 @@ check($rc === 2, 'missing --below: exit 2');
 list($rc) = runCheck($root, $work, $port, 'healthy', array('balance'));
 check($rc === 2, 'unknown command: exit 2');
 $proc = proc_open(array(PHP_BINARY, "$root/bin/pm-check", 'credits', '--below', '1', '--key-file', "$work/absent.key"), array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $p);
+stream_get_contents($p[1]);
+stream_get_contents($p[2]);
+fclose($p[1]);
+fclose($p[2]);
 check(proc_close($proc) === 2, 'missing key file: exit 2');
 
 proc_terminate($server);
