@@ -25,11 +25,11 @@ On a Pulsed Media seedbox with Pikkumies installed, Pikkumies already gives Open
 Tested with OpenClaw 2026.10.5. You need `git` and `curl`; the scheduled check also needs PHP 8.2 or newer with curl.
 
 ```sh
-git clone --branch v0.2.0 https://github.com/MagnaCapax/mcxKokko ~/src/mcxKokko
+git clone https://github.com/MagnaCapax/mcxKokko ~/src/mcxKokko
 openclaw plugins install -l ~/src/mcxKokko
 ```
 
-OpenClaw shows what the bundle adds (five skills) and asks before enabling it; in a script without a terminal, add `--force` after you have reviewed it. Update later with `git -C ~/src/mcxKokko pull` (or check out a newer tag).
+OpenClaw shows what the bundle adds (five skills) and asks before enabling it; in a script without a terminal, add `--force` after you have reviewed it. Update later with `git -C ~/src/mcxKokko pull`.
 
 Without the plugin step, point OpenClaw at the skills folder instead, in `~/.openclaw/openclaw.json`:
 
