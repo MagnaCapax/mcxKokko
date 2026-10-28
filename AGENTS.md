@@ -2,7 +2,7 @@
 
 ## What this is
 
-Skills that teach an AI agent (OpenClaw first, any agent that reads AgentSkills folders too) to use Pulsed Media's services with the user's own keys: the AI credit balance, the customer API feed, support tickets, and the public documentation. Plus one small PHP command, `bin/pm-check`, for a scheduled check that costs no AI credits.
+Skills that teach an AI agent (OpenClaw first, any agent that reads AgentSkills folders too) to use Pulsed Media's services with the user's own keys: the AI credit balance, the customer API feed, ordering a new service, support tickets, and the public documentation. Plus one small PHP command, `bin/pm-check`, for a scheduled check that costs no AI credits.
 
 Start with [`development/`](development/README.md). [ADR 0001](docs/adr/0001-layout-languages-and-install.md) maps the layout, the languages and the install paths.
 
@@ -29,7 +29,7 @@ KISS, DRY, YAGNI. Delete first. Pit of success: safe defaults, risky paths expli
 
 ## Invariants the tests protect
 
-1. Four prefixed skills with valid frontmatter, each listed in the README.
+1. Every skill has a `pm-` prefixed name and valid frontmatter, and is listed in the README.
 2. No key header written into a command line, no key-shaped literal, no `/tmp` path in a skill.
 3. Every URL a skill or `pm-check` uses is declared in SECURITY.md.
 4. `plugin.json` carries the exact Agent Plugins schema URL, and nothing at the root turns the repository into a native plugin.
